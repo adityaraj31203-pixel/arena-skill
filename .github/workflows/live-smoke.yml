@@ -1,8 +1,16 @@
 name: Live smoke test (manual, opt-in)
 
-# A deliberately tiny live run: 2 competitors, 1 round, 11 model calls including
-# the final check. Its purpose is to prove the live path works end to end and
-# records real provider responses. It is not a tournament.
+# A deliberately tiny live run: 2 competitors, 1 round, 7 model calls.
+#
+#   spawn              2 calls  (one per competitor)
+#   round 1, 1 match   5 calls  (2 attacks, 2 defences, 1 judge)
+#   final check        0 calls  (this workflow sets no baseline, so there is none)
+#                      -----
+#                      7 calls
+#
+# Adding a baseline would add exactly one call, for the blind final check. Its
+# purpose is to prove the live path works end to end and records real provider
+# responses. It is not a tournament.
 #
 # It costs a small amount of real money. It is manual-only and requires:
 #   - the provider key as a repository secret

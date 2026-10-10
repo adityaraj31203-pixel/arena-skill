@@ -28,6 +28,51 @@ from .redact import redact
 DEFAULT_TIMEOUT = 120
 MAX_TRANSPORT_ATTEMPTS = 4
 
+#: Hard ceiling on a single retry sleep, in seconds.
+#:
+#: A 429 response carries a Retry-After header that the provider chooses. Taken
+#: at face value that is an unbounded, remotely controlled sleep: a header of
+#: "86400" would park the worker for 24 hours per retry, and a runner or CI job
+#: would sit there until something else killed it. The header is treated as a
+#: hint and clamped to this ceiling. Retry counts and the exponential fallback
+#: are unchanged, so total worst-case waiting stays bounded and predictable.
+MAX_RETRY_DELAY = 30.0
+
+
+def parse_retry_after(raw):
+    """Parse a Retry-After header into seconds, or None.
+
+    Returns None for anything unusable, so the caller falls back to its own
+    bounded exponential backoff. Negative and absurd values are rejected here
+    rather than trusted, and HTTP-date forms are not interpreted.
+    """
+    if raw is None:
+        return None
+    text = str(raw).strip()
+    if not text:
+        return None
+    try:
+        value = float(text)
+    except (TypeError, ValueError):
+        return None
+    if value != value or value in (float("inf"), float("-inf")):
+        return None
+    if value < 0:
+        return None
+    return value
+
+
+def bounded_delay(retry_after, attempt, backoff=1.5, cap=MAX_RETRY_DELAY):
+    """Seconds to wait before the next attempt. Never exceeds `cap`.
+
+    `attempt` is 1-based. With no usable Retry-After the delay grows
+    exponentially from `backoff`, exactly as before, and is still clamped.
+    """
+    parsed = parse_retry_after(retry_after)
+    if parsed is None:
+        parsed = backoff ** max(0, attempt - 1)
+    return min(float(parsed), cap)
+
 
 class HTTPProvider(ProviderAdapter):
     """Base HTTP adapter. Subclasses build the request body and parse the reply."""
@@ -133,13 +178,10 @@ class HTTPProvider(ProviderAdapter):
                     pass
                 detail = self._safe(detail)
                 if exc.code == 429:
-                    retry_after = exc.headers.get("Retry-After") if exc.headers else None
-                    try:
-                        retry_after = float(retry_after) if retry_after else None
-                    except ValueError:
-                        retry_after = None
+                    raw_retry_after = exc.headers.get("Retry-After") if exc.headers else None
                     last_error = RateLimited(
-                        "%s: 429 %s" % (self.name, detail), retry_after=retry_after)
+                        "%s: 429 %s" % (self.name, detail),
+                        retry_after=parse_retry_after(raw_retry_after))
                 elif 500 <= exc.code < 600:
                     last_error = ProviderError(
                         "%s: HTTP %d %s" % (self.name, exc.code, detail),
@@ -158,10 +200,10 @@ class HTTPProvider(ProviderAdapter):
                     "%s: %s" % (self.name, self._safe(str(exc))), retryable=True)
 
             if attempt < self.max_attempts:
-                delay = getattr(last_error, "retry_after", None)
-                if delay is None:
-                    delay = min(30.0, 1.5 ** (attempt - 1))
-                time.sleep(delay)
+                # Clamped: a provider-supplied Retry-After can never make this
+                # worker sleep longer than MAX_RETRY_DELAY for one retry.
+                time.sleep(bounded_delay(getattr(last_error, "retry_after", None),
+                                         attempt))
 
         raise last_error if last_error else ProviderError(
             "%s: exhausted %d attempts" % (self.name, self.max_attempts))

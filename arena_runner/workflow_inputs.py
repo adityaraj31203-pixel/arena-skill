@@ -20,6 +20,14 @@ PROVIDER_SECRET_ENV = {
     "anthropic": "ARENA_ANTHROPIC_API_KEY",
 }
 
+#: Every input the workflows may supply. Anything else is rejected rather than
+#: ignored, so a user-supplied value can never be silently dropped.
+KNOWN_INPUTS = frozenset({
+    "task", "baseline", "agents", "seed", "provider", "model", "base_url",
+    "concurrency", "max_calls", "max_retries", "max_minutes", "max_input_chars",
+    "max_output_tokens", "price_in", "price_out", "max_estimated_usd", "confirm",
+})
+
 LIMITS = {
     "agents": (1, 64),            # the expensive 100-agent default is not offered
     "concurrency": (1, 8),
@@ -46,6 +54,32 @@ def _int(name, raw, lo, hi, default=None, optional=False):
     return value
 
 
+def _base_url(raw):
+    """Validate an optional API base URL override.
+
+    Only http and https are accepted, embedded credentials are rejected (they
+    would end up in logs and in the request line), and whitespace is refused so
+    a stray newline cannot split a header.
+    """
+    if raw is None or str(raw).strip() == "":
+        return None
+    url = str(raw).strip()
+    if any(c.isspace() for c in url):
+        raise ArenaRunnerError("base_url must not contain whitespace")
+    if len(url) > 500:
+        raise ArenaRunnerError("base_url looks too long to be a URL")
+    if not (url.startswith("https://") or url.startswith("http://")):
+        raise ArenaRunnerError(
+            "base_url must start with https:// or http://, got %r" % url)
+    authority = url.split("://", 1)[1].split("/", 1)[0]
+    if "@" in authority:
+        raise ArenaRunnerError(
+            "base_url must not embed credentials; use the provider secret instead")
+    if not authority:
+        raise ArenaRunnerError("base_url has no host")
+    return url.rstrip("/")
+
+
 def _float(name, raw):
     if raw is None or str(raw).strip() == "":
         return None
@@ -66,6 +100,12 @@ def validate(inputs, secrets_present=(), require_live_confirmation=True):
     """
     if not isinstance(inputs, dict):
         raise ArenaRunnerError("inputs must be a mapping")
+
+    unknown = sorted(set(inputs) - set(KNOWN_INPUTS))
+    if unknown:
+        raise ArenaRunnerError(
+            "unknown input(s): %s. Refusing to run, because an ignored input is "
+            "worse than a rejected one." % ", ".join(unknown))
 
     provider = str(inputs.get("provider") or "").strip()
     if provider not in ALLOWED_PROVIDERS:
@@ -113,6 +153,7 @@ def validate(inputs, secrets_present=(), require_live_confirmation=True):
         "seed": seed,
         "task": task,
         "baseline": str(inputs.get("baseline") or "").strip() or None,
+        "base_url": _base_url(inputs.get("base_url")),
         "live": live,
         "confirmed": confirm == CONFIRM_TOKEN,
         "secret_env": PROVIDER_SECRET_ENV.get(provider),

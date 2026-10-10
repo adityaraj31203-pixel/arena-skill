@@ -13,9 +13,9 @@ import unittest
 
 from helper import TempWorkspace, make_state, read
 
-from arena_runner.bracket import (advance, collect, current_round, load_state,
-                                  phase_jobs, save_state, winner_report,
-                                  write_prompts)
+from arena_runner.bracket import (advance, collect, current_round, decide,
+                                  load_state, phase_jobs, save_state,
+                                  winner_report, write_prompts)
 from arena_runner.budget import Budget
 from arena_runner.errors import ArenaRunnerError, BudgetExceeded
 from arena_runner.providers import CompletionResult, MockProvider, ScriptedMockProvider
@@ -314,6 +314,16 @@ class ControllerNeverJudges(unittest.TestCase):
                               "a champion was crowned without a valid verdict")
 
     def test_the_recorded_winner_comes_from_the_judge_verdict_file(self):
+        """The controller adds no opinion of its own to a judge's verdict.
+
+        bracket.decide is the only thing that turns a verdict into a winner, and
+        it is documented to let the judge's own scores win when they disagree
+        with the judge's stated pick. So the invariant is that re-running decide
+        on the persisted verdict file reproduces the recorded winner and totals
+        exactly. The recorded winner is deliberately NOT required to equal
+        verdict["winner"]: when the judge's arithmetic favours the other side,
+        the arithmetic wins, and the engine says so in the note.
+        """
         with TempWorkspace() as ws:
             state = make_state(ws, agents=2, seed=7)
             runner = TournamentRunner(state, ScriptedMockProvider(), backoff=0.0)
@@ -322,10 +332,85 @@ class ControllerNeverJudges(unittest.TestCase):
             runner._collect()
             final = reload_state(ws.path("run"))
             match = final["rounds"][0]["matches"][0]
-            verdict = json.load(open(os.path.join(
-                ws.path("run"), "r1", match["id"] + ".verdict.json")))
-            self.assertEqual(match["winner"], verdict["winner"])
+            with open(os.path.join(ws.path("run"), "r1",
+                                   match["id"] + ".verdict.json"),
+                      encoding="utf-8") as fh:
+                verdict = json.load(fh)
+
             self.assertEqual(match["source"], "judge")
+            self.assertIn(match["winner"], (match["a"], match["b"]))
+            self.assertEqual({match["winner"], match["loser"]},
+                             {match["a"], match["b"]})
+            self.assertTrue(verdict.get("_blinded"),
+                            "the verdict on disk was not de-anonymised from a "
+                            "blinded pass, so the controller could have judged")
+
+            expected, totals, _note = decide(verdict, match["a"], match["b"])
+            self.assertEqual(match["winner"], expected,
+                             "the recorded winner is not what decide() derives "
+                             "from the judge's own verdict file")
+            self.assertEqual(match["scores"][match["a"]], totals[match["a"]])
+            self.assertEqual(match["scores"][match["b"]], totals[match["b"]])
+
+    def test_the_recorded_winner_never_diverges_from_the_verdict_arithmetic(self):
+        """Regression: the recorded winner must track the verdict's own scores.
+
+        The judge prompt embeds the absolute scratch path of the run directory,
+        so the test double's prompt-derived scores differ for every fresh
+        temporary workspace. Roughly one run in six lands on a verdict whose
+        stated pick disagrees with its own weighted totals, and on those runs an
+        assertion of `winner == verdict["winner"]` fails with something like
+        `'a001' != 'a002'`. That was a wrong expectation, not a race: the
+        original engine documents that the scores win over the judge's stated
+        pick. This repeats the tournament in enough fresh workspaces to hit both
+        outcomes, and requires the recorded winner to equal decide() every time.
+        """
+        overridden = 0
+        trials = 12
+        for _ in range(trials):
+            with TempWorkspace() as ws:
+                state = make_state(ws, agents=2, seed=7)
+                runner = TournamentRunner(state, ScriptedMockProvider(),
+                                          backoff=0.0)
+                for phase in ("spawn", "attack", "defend", "judge"):
+                    runner.run_phase(phase)
+                runner._collect()
+                final = reload_state(ws.path("run"))
+                match = final["rounds"][0]["matches"][0]
+                with open(os.path.join(ws.path("run"), "r1",
+                                       match["id"] + ".verdict.json"),
+                          encoding="utf-8") as fh:
+                    verdict = json.load(fh)
+
+                self.assertEqual(match["source"], "judge")
+                expected, _totals, _note = decide(verdict, match["a"],
+                                                  match["b"])
+                self.assertEqual(match["winner"], expected)
+                if match["winner"] != verdict["winner"]:
+                    # The judge's stated pick lost to its own arithmetic. This
+                    # is expected on roughly one workspace in six, and is
+                    # pinned deterministically by the test below; asserting on
+                    # it here would reintroduce the flakiness being removed.
+                    overridden += 1
+
+    def test_a_verdict_whose_scores_contradict_its_pick_is_decided_by_the_scores(self):
+        """Pin the documented rule directly, without depending on a hash."""
+        verdict = {
+            "match": "blinded",
+            "reason": "the judge names solB but scores solA higher",
+            "scores": {
+                "a001": {"correctness": 9, "completeness": 9, "robustness": 9,
+                         "specificity": 9, "clarity": 9, "fatal": False},
+                "a002": {"correctness": 2, "completeness": 2, "robustness": 2,
+                         "specificity": 2, "clarity": 2, "fatal": False},
+            },
+            "winner": "a002",
+            "standing": {"a001": [], "a002": []},
+        }
+        winner, totals, note = decide(verdict, "a001", "a002")
+        self.assertEqual(winner, "a001")
+        self.assertGreater(totals["a001"], totals["a002"])
+        self.assertNotEqual(note, "", "the engine must say it overrode the pick")
 
 
 class ArtifactPersistence(unittest.TestCase):

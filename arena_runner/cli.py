@@ -31,7 +31,10 @@ def _provider(args):
     registry = build_registry()
     model = args.model or ("mock-model-1"
                            if args.provider in ("mock", "scripted-mock") else "")
-    return registry.create(args.provider, model=model)
+    kwargs = {"model": model}
+    if getattr(args, "base_url", None):
+        kwargs["base_url"] = args.base_url
+    return registry.create(args.provider, **kwargs)
 
 
 def _require_live_confirmation(args):
@@ -192,9 +195,14 @@ def cmd_workflow(args):
         with open(baseline_file, "w", encoding="utf-8") as fh:
             fh.write(config["baseline"] + "\n")
 
+    provider_kwargs = {}
+    if config["secret_env"]:
+        provider_kwargs["api_key_env"] = config["secret_env"]
+    if config.get("base_url"):
+        provider_kwargs["base_url"] = config["base_url"]
+        print("using API base URL override: %s" % config["base_url"])
     provider = build_registry().create(
-        config["provider"], model=config["model"],
-        **({"api_key_env": config["secret_env"]} if config["secret_env"] else {}))
+        config["provider"], model=config["model"], **provider_kwargs)
 
     state = init_run(run_dir, config["agents"], seed=config["seed"],
                      task_file=task_file, baseline_file=baseline_file)
@@ -278,6 +286,7 @@ def build_parser():
                    choices=["mock", "scripted-mock", "openai-compatible", "anthropic"])
     p.add_argument("--model")
     p.add_argument("--api-key-env", default="ARENA_PROVIDER_API_KEY")
+    p.add_argument("--base-url", help="API base URL override for the provider")
     p.add_argument("--concurrency", type=int, default=2)
     p.add_argument("--max-calls", type=int, default=200)
     p.add_argument("--max-retries", type=int, default=2)

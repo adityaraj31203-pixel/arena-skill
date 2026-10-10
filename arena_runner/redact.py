@@ -24,12 +24,44 @@ PATTERNS = [
 
 REDACTED = "[REDACTED]"
 
-# Environment variables whose *values* are treated as secrets wherever they appear.
-SECRET_ENV_PREFIXES = (
-    "ARENA_", "OPENAI_", "ANTHROPIC_", "GEMINI_", "GOOGLE_",
-    "GITHUB_TOKEN", "GH_TOKEN",
+# Environment variables whose *values* are treated as secrets wherever they
+# appear.
+#
+# The match is on the shape of the variable NAME, not on a vendor prefix. The
+# earlier version of this list treated every "ARENA_*" variable as a secret,
+# which was wrong in a way that mattered: the GitHub Actions workflow passes
+# every input as ARENA_IN_*, so the provider name and model name were scrubbed
+# out of the run log. That destroyed the very provenance the independence report
+# is supposed to present, while adding no security at all, because a variable
+# called ARENA_IN_MODEL does not hold a credential.
+#
+# Detection is not weakened to compensate. A name is a secret when it carries a
+# credential-shaped word anywhere in it, or ends in a credential suffix, and the
+# regex patterns below still catch well-formed keys regardless of the name they
+# arrived in.
+SECRET_NAME_TOKENS = (
+    "SECRET", "TOKEN", "PASSWORD", "PASSWD", "CREDENTIAL",
+    "APIKEY", "API_KEY", "PRIVATE_KEY", "ACCESS_KEY", "AUTH",
 )
-SECRET_ENV_SUFFIXES = ("_KEY", "_TOKEN", "_SECRET", "_PASSWORD")
+SECRET_ENV_SUFFIXES = (
+    "_KEY", "_TOKEN", "_SECRET", "_PASSWORD", "_CREDENTIAL", "_CREDENTIALS",
+)
+# Names that are credentials but do not follow either convention above.
+SECRET_ENV_EXACT = frozenset({"GH_TOKEN", "GITHUB_TOKEN"})
+
+# Configuration namespaces that carry no credentials. Listed so the intent is
+# explicit and testable; the rules above already exclude them.
+NON_SECRET_ENV_PREFIXES = ("ARENA_IN_", "ARENA_RUN_DIR", "ARENA_WORKSPACE")
+
+
+def is_secret_name(name):
+    """True when an environment variable name says it holds a credential."""
+    upper = str(name).upper()
+    if upper in SECRET_ENV_EXACT:
+        return True
+    if any(upper.endswith(suffix) for suffix in SECRET_ENV_SUFFIXES):
+        return True
+    return any(token in upper for token in SECRET_NAME_TOKENS)
 
 
 def secret_values_from_env(environ=None, extra=()):
@@ -43,8 +75,7 @@ def secret_values_from_env(environ=None, extra=()):
     for name, value in environ.items():
         if not value or len(value) < 8:
             continue
-        if any(name.startswith(p) for p in SECRET_ENV_PREFIXES) or \
-                any(name.endswith(s) for s in SECRET_ENV_SUFFIXES):
+        if is_secret_name(name):
             found.add(value)
     for value in extra:
         if value and len(value) >= 8:
@@ -52,7 +83,7 @@ def secret_values_from_env(environ=None, extra=()):
     return found
 
 
-def redact(text, secrets=()):
+def redact(text, secrets=()):  # noqa: C901
     """Scrub known credential shapes and any explicitly supplied secret values."""
     if text is None:
         return None

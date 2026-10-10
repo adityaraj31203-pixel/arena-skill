@@ -48,6 +48,10 @@ on:
         type: string
         required: false
         default: "mock-model-1"
+      base_url:
+        description: "Optional API base URL override, for OpenAI-compatible gateways"
+        type: string
+        required: false
       concurrency:
         description: "Parallel model requests, 1-8"
         type: string
@@ -118,6 +122,7 @@ jobs:
           ARENA_IN_SEED: ${{ inputs.seed }}
           ARENA_IN_PROVIDER: ${{ inputs.provider }}
           ARENA_IN_MODEL: ${{ inputs.model }}
+          ARENA_IN_BASE_URL: ${{ inputs.base_url }}
           ARENA_IN_CONCURRENCY: ${{ inputs.concurrency }}
           ARENA_IN_MAX_CALLS: ${{ inputs.max_calls }}
           ARENA_IN_MAX_MINUTES: ${{ inputs.max_minutes }}

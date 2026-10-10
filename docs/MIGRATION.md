@@ -255,8 +255,11 @@ HTTP server used to exercise the adapters. CI runs this on every push and pull
 request and cannot incur model charges.
 
 The live path is exercised only by the manual **Live smoke test** workflow: two
-competitors, about 11 calls, opt-in, requires a configured secret and the
-confirmation token.
+competitors, **7 model calls** (2 spawn, then 5 for the single match: 2 attacks,
+2 defences, 1 judge), opt-in, requires a configured secret and the confirmation
+token. That workflow configures no baseline, so there is no final check and no
+eighth call. `expected_calls(2, baseline=False)` in `arena_runner/workflow_inputs.py`
+derives this number, and it agrees with the engine's own `plan_totals(2)`.
 
 ## 11. What this does not do
 
@@ -266,3 +269,45 @@ confirmation token.
   not the weights.
 - It does not fix a vague task.
 - It does not run tournaments automatically, ever.
+
+## 12. Known follow-up items
+
+These were found in the pre-merge audit of the migration and are deliberately
+left open. None of them blocks a run, and each is recorded here rather than
+quietly dropped.
+
+| ID | Severity | Summary |
+| --- | --- | --- |
+| D6 | Low-medium | `Budget.max_retries` is a single global counter, while `budget.py` and the `max_retries` workflow input describe it as per job. With `max_retries=2` the third retry anywhere in a run is refused for every job. Per-job retry accounting would match the documentation. |
+| D7 | Low | `Budget.check_before_call` and `record_call` are not atomic together, so the call cap has a check-then-act window. In the real runner path the measured overshoot was zero, because the intervening run-log write happens to serialise the workers. That is an accident, not a guarantee; making the gate atomic would remove the reliance on it. |
+| D8 | Low | There is no whole-run lock. `runlog.lock()` covers the collect and advance transitions only, not `run_phase` or `init_run`. Two concurrent processes pointed at one run directory could dispatch the same jobs twice. GitHub Actions prevents this with its `concurrency` group; running locally does not. |
+| D9 | Low | The CI secret guard excludes `tests/*`, so a credential committed under `tests/` would not be caught by that step. The repository's test fixtures are built by concatenation so no contiguous credential shape exists today. |
+| D10 | Low | `test_jobs_run_concurrently_up_to_the_limit` runs at concurrency 3 with 8 jobs. It passes consistently, but it exercises the same code path as the D1 race and could become flaky on a slower shared runner. |
+
+D1 through D5 from that audit are fixed, and each fix has a regression test in
+`tests/test_regression_defects.py` that fails against the pre-fix code.
+
+### D11, found while verifying the fixes above
+
+`test_the_recorded_winner_comes_from_the_judge_verdict_file` failed about one
+run in six with `'a001' != 'a002'`. It was a wrong expectation in the test, not
+a race, and it predates these fixes: the same test fails 2 times in 30 runs
+against the pre-fix code at the pull request head.
+
+The judge prompt embeds the absolute scratch path of the run directory, and the
+offline test double derives its verdict scores from a hash of that prompt, so a
+different temporary workspace yields different scores. Roughly one workspace in
+six produces a verdict whose stated pick disagrees with its own weighted totals,
+and the original engine documents that the scores win in that case.
+
+The test now asserts the real invariant: re-running `bracket.decide` on the
+persisted verdict file must reproduce the recorded winner and both totals. Two
+tests were added beside it, one that repeats the tournament in twelve fresh
+workspaces and one that pins the scores-beat-the-pick rule with fixed inputs.
+Both fail against a runner that substitutes its own winner, and the second fails
+against a `decide` that prefers the judge's stated pick.
+
+The remaining cosmetic oddity is left alone on purpose: because the prompt
+carries an absolute path, the offline double's verdicts are not reproducible
+across run directories. That affects only the test double. A real provider does
+not score by hashing the scratch path.

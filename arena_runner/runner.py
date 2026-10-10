@@ -146,7 +146,40 @@ class TournamentRunner:
 
     # -- single job ----------------------------------------------------------
     def execute_job(self, job):
-        """Run one job end to end. Returns a per-job summary dict."""
+        """Run one job end to end. Always returns a summary; never raises.
+
+        Every exit path records a terminal status in the run log, so a job can
+        never be left marked "running" by an unexpected exception. Worker
+        threads therefore cannot lose the evidence of what happened to a job.
+        """
+        job_id = job["id"]
+        try:
+            return self._execute_job(job)
+        except BudgetExceeded as exc:
+            return self._fail_job(job, exc, attempt=0)
+        except Exception as exc:
+            return self._fail_job(job, exc, attempt=None)
+
+    def _fail_job(self, job, exc, attempt=None):
+        """Record a terminal failure for a job whose execution broke down."""
+        job_id = job["id"]
+        kind = getattr(exc, "kind", None) or type(exc).__name__.lower()
+        try:
+            self.runlog.finish_job(job_id, error=exc, attempt=attempt,
+                                   cause_kind=kind)
+            self.runlog.save()
+        except Exception:
+            # Recording must not mask the original error, and must not raise
+            # from inside an exception handler on a worker thread.
+            pass
+        self.on_event({"type": "job_failed", "job_id": job_id,
+                       "error": redact(str(exc), self.secrets)})
+        return {"job_id": job_id, "status": "failed",
+                "attempts": attempt or 0, "error_kind": kind,
+                "error": redact(str(exc), self.secrets)}
+
+    def _execute_job(self, job):
+        """The job body. May raise; execute_job turns that into a record."""
         job_id = job["id"]
         brief_path = job["prompt"]
         if not os.path.exists(brief_path):
@@ -157,15 +190,7 @@ class TournamentRunner:
         prompt, isolation = self.build_prompt(job, brief_text)
         request = self.build_request(job, prompt)
 
-        try:
-            self.budget.check_before_call(len(prompt), request.max_tokens)
-        except BudgetExceeded as exc:
-            self.runlog.start_job(job_id, job["kind"], job["kind"], request,
-                                  self.provider.describe())
-            self.runlog.finish_job(job_id, error=exc)
-            self.runlog.save()
-            return {"job_id": job_id, "status": "failed", "attempts": 0,
-                    "error_kind": exc.kind, "error": str(exc)}
+        self.budget.check_before_call(len(prompt), request.max_tokens)
 
         self.runlog.start_job(job_id, job["kind"], job["kind"], request,
                               self.provider.describe())
@@ -250,13 +275,11 @@ class TournamentRunner:
                 job = futures[future]
                 try:
                     outcome = future.result()
-                except BudgetExceeded as exc:
-                    outcome = {"job_id": job["id"], "status": "failed",
-                               "error_kind": exc.kind, "error": str(exc)}
-                except Exception as exc:        # one job must never kill the phase
-                    outcome = {"job_id": job["id"], "status": "failed",
-                               "error_kind": "unexpected",
-                               "error": redact(str(exc), self.secrets)}
+                except Exception as exc:
+                    # execute_job is total, so this is a last-resort net. It
+                    # still records a terminal status rather than leaving the
+                    # job marked running.
+                    outcome = self._fail_job(job, exc)
                 (done if outcome["status"] == "done" else failed).append(outcome)
 
         summary = {"phase": phase, "dispatched": len(outstanding), "done": len(done),
@@ -329,7 +352,7 @@ class TournamentRunner:
         return {"steps": steps, "champion": self.state.get("champion"),
                 "final": self.state.get("final"),
                 "budget": self.budget.summary(),
-                "independence": self.runlog.data["independence"]}
+                "independence": self.runlog.snapshot().get("independence")}
 
 
 def independence_report(runlog, provider):
