@@ -1,0 +1,105 @@
+name: Live smoke test (manual, opt-in)
+
+# A deliberately tiny live run: 2 competitors, 1 round, 11 model calls including
+# the final check. Its purpose is to prove the live path works end to end and
+# records real provider responses. It is not a tournament.
+#
+# It costs a small amount of real money. It is manual-only and requires:
+#   - the provider key as a repository secret
+#   - the confirm input set to the exact token below
+#
+# The job prints every request ID and token count it receives, so you can
+# reconcile the run against your provider's own billing dashboard.
+
+on:
+  workflow_dispatch:
+    inputs:
+      provider:
+        description: "Which live provider to exercise"
+        type: choice
+        required: true
+        options:
+          - openai-compatible
+          - anthropic
+      model:
+        description: "Model identifier to use for every call"
+        type: string
+        required: true
+      base_url:
+        description: "Optional API base URL override (for compatible gateways)"
+        type: string
+        required: false
+      confirm:
+        description: "Required: I-understand-this-may-incur-API-charges"
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: arena-live-smoke
+  cancel-in-progress: false
+
+jobs:
+  smoke:
+    name: Two-competitor live run
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Write the smoke-test task
+        run: |
+          mkdir -p .arena-workspace
+          cat > .arena-workspace/task.md <<'TASK'
+          # Task
+          Write the pricing-page headline for a CI caching product.
+
+          Requirements:
+          - Audience: backend engineers evaluating the product.
+          - At most 12 words. No exclamation marks.
+          - Must name the concrete benefit: cutting CI build times.
+          - Must not use "revolutionary", "game-changing" or "AI-powered".
+          - Plain, direct tone.
+
+          Done looks like: one headline plus one sentence of supporting subcopy.
+          TASK
+
+      - name: Run two competitors
+        env:
+          ARENA_IN_TASK: "Write the pricing-page headline for a CI caching product. At most 12 words, no exclamation marks, must name the concrete benefit of cutting CI build times, must not use the words revolutionary, game-changing or AI-powered, plain and direct tone. Done looks like one headline plus one sentence of supporting subcopy."
+          ARENA_IN_AGENTS: "2"
+          ARENA_IN_PROVIDER: ${{ inputs.provider }}
+          ARENA_IN_MODEL: ${{ inputs.model }}
+          ARENA_IN_BASE_URL: ${{ inputs.base_url }}
+          ARENA_IN_CONCURRENCY: "2"
+          ARENA_IN_MAX_CALLS: "20"
+          ARENA_IN_MAX_MINUTES: "20"
+          ARENA_IN_MAX_RETRIES: "2"
+          ARENA_IN_CONFIRM: ${{ inputs.confirm }}
+          ARENA_OPENAI_API_KEY: ${{ secrets.ARENA_OPENAI_API_KEY }}
+          ARENA_ANTHROPIC_API_KEY: ${{ secrets.ARENA_ANTHROPIC_API_KEY }}
+          ARENA_RUN_DIR: ${{ github.workspace }}/.arena/run
+          ARENA_WORKSPACE: ${{ github.workspace }}/.arena-workspace
+        run: python3 -m arena_runner workflow
+
+      - name: Upload run artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: arena-live-smoke
+          path: |
+            .arena/run/arena.json
+            .arena/run/runlog.json
+            .arena/run/final.verdict.json
+            .arena/run/r*/*.md
+            .arena-workspace/report.md
+          if-no-files-found: warn
+          retention-days: 30
