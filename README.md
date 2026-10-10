@@ -212,3 +212,40 @@ Made by Jake Schincariol, [opusjake.ai](https://opusjake.ai).
 ## License
 
 MIT. Take it, change it, ship it.
+
+---
+
+## Independent multi-agent runner (no Claude Code required)
+
+The skill above drives sub-agents through Claude Code's Agent tool. If you do not
+have Claude Code, or you want to run a tournament from a phone, `arena_runner/`
+does the same tournament against any model API instead. It is additive: the
+engine, the skill and the original 27 tests are unchanged.
+
+```bash
+python3 -m arena_runner doctor              # what is configured
+python3 -m arena_runner plan --agents 4     # how many model calls it will take
+python3 -m arena_runner run --agents 2 --task-file task.md --provider scripted-mock
+```
+
+Every competitor, attacker, defender and judge becomes one stateless API request
+with its own isolated context. Nothing is executed by one assistant pretending to
+be many: the run record proves it by fingerprinting the exact context sent to
+each request, and the report states the independence level it actually achieved,
+with the caveats.
+
+Run it from a phone through GitHub Actions: open the repository, Actions, **Arena
+tournament (manual)**, Run workflow. Tournaments are manual-only and never run on
+push or pull request, because a live run is billed. Results come back as a
+downloadable artifact, so you can close the browser.
+
+Full details, provider setup, secret names, cost controls, recovery steps and
+troubleshooting: [docs/MIGRATION.md](docs/MIGRATION.md).
+
+Two things worth saying plainly. Multiple requests to one model are separate
+contexts, not different underlying models. And model-based judging is an
+evaluation against the rubric, not proof of correctness.
+
+```bash
+python3 -m unittest discover -s tests -v    # 195 tests, no credentials, no spend
+```

@@ -4,3 +4,8 @@ __pycache__/
 .venv/
 *.tmp
 .arena/
+
+# Migration: local state and credentials
+.env
+.env.*
+.arena-workspace/

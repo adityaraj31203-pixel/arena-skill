@@ -1,0 +1,153 @@
+name: Arena tournament (manual)
+
+# Manual-only. This workflow is NOT triggered by push or pull_request, because a
+# live run makes paid model API calls.
+#
+# BEFORE YOU RUN IT
+#   1. Set agents to 2 for a first smoke test. The default is deliberately small.
+#   2. Read the "expected calls" line the validation step prints.
+#   3. If provider is anything other than an offline test double, you must also
+#      set confirm to the exact token shown in the input description.
+#   4. Add the provider key as a repository secret. Never commit it.
+#
+# The workflow uploads the whole run directory as an artifact, so you can close
+# the browser and read the result later from your phone.
+
+on:
+  workflow_dispatch:
+    inputs:
+      task:
+        description: "The task every competitor receives, word for word"
+        type: string
+        required: true
+      baseline:
+        description: "Optional: an earlier answer to beat (enables the final check)"
+        type: string
+        required: false
+      agents:
+        description: "Competitors, 1-64. Use 2 for a smoke test."
+        type: string
+        required: false
+        default: "2"
+      seed:
+        description: "Optional seed. Same seed gives the same cards and bracket."
+        type: string
+        required: false
+      provider:
+        description: "scripted-mock (free), openai-compatible, or anthropic"
+        type: choice
+        required: false
+        default: "scripted-mock"
+        options:
+          - scripted-mock
+          - mock
+          - openai-compatible
+          - anthropic
+      model:
+        description: "Model identifier, e.g. gpt-4o-mini or claude-3-5-haiku-latest"
+        type: string
+        required: false
+        default: "mock-model-1"
+      base_url:
+        description: "Optional API base URL override, for OpenAI-compatible gateways"
+        type: string
+        required: false
+      concurrency:
+        description: "Parallel model requests, 1-8"
+        type: string
+        required: false
+        default: "2"
+      max_calls:
+        description: "Hard cap on model requests. The run stops at this number."
+        type: string
+        required: false
+        default: "60"
+      max_minutes:
+        description: "Hard cap on wall-clock minutes"
+        type: string
+        required: false
+        default: "30"
+      max_retries:
+        description: "Retries per job, 0-5. Never unlimited."
+        type: string
+        required: false
+        default: "2"
+      price_in:
+        description: "Optional USD per million input tokens, for an ESTIMATE only"
+        type: string
+        required: false
+      price_out:
+        description: "Optional USD per million output tokens, for an ESTIMATE only"
+        type: string
+        required: false
+      max_estimated_usd:
+        description: "Optional estimated-spend stop. An estimate, not a hard cap."
+        type: string
+        required: false
+      confirm:
+        description: "For live providers only: I-understand-this-may-incur-API-charges"
+        type: string
+        required: false
+
+permissions:
+  contents: read
+
+# One tournament at a time. Prevents two runs charging the same account and
+# prevents inconsistent advancement of the same state.
+concurrency:
+  group: arena-tournament
+  cancel-in-progress: false
+
+jobs:
+  tournament:
+    name: Run
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # Inputs travel through the environment, never the command line, so a
+      # hostile input string cannot break out into a shell command.
+      - name: Run tournament
+        env:
+          ARENA_IN_TASK: ${{ inputs.task }}
+          ARENA_IN_BASELINE: ${{ inputs.baseline }}
+          ARENA_IN_AGENTS: ${{ inputs.agents }}
+          ARENA_IN_SEED: ${{ inputs.seed }}
+          ARENA_IN_PROVIDER: ${{ inputs.provider }}
+          ARENA_IN_MODEL: ${{ inputs.model }}
+          ARENA_IN_BASE_URL: ${{ inputs.base_url }}
+          ARENA_IN_CONCURRENCY: ${{ inputs.concurrency }}
+          ARENA_IN_MAX_CALLS: ${{ inputs.max_calls }}
+          ARENA_IN_MAX_MINUTES: ${{ inputs.max_minutes }}
+          ARENA_IN_MAX_RETRIES: ${{ inputs.max_retries }}
+          ARENA_IN_PRICE_IN: ${{ inputs.price_in }}
+          ARENA_IN_PRICE_OUT: ${{ inputs.price_out }}
+          ARENA_IN_MAX_ESTIMATED_USD: ${{ inputs.max_estimated_usd }}
+          ARENA_IN_CONFIRM: ${{ inputs.confirm }}
+          ARENA_OPENAI_API_KEY: ${{ secrets.ARENA_OPENAI_API_KEY }}
+          ARENA_ANTHROPIC_API_KEY: ${{ secrets.ARENA_ANTHROPIC_API_KEY }}
+          ARENA_RUN_DIR: ${{ github.workspace }}/.arena/run
+          ARENA_WORKSPACE: ${{ github.workspace }}/.arena-workspace
+        run: python3 -m arena_runner workflow
+
+      - name: Upload run artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: arena-run
+          path: |
+            .arena/run/arena.json
+            .arena/run/runlog.json
+            .arena/run/final.verdict.json
+            .arena/run/r*/*.md
+            .arena/run/final/
+            .arena-workspace/report.md
+          if-no-files-found: warn
+          retention-days: 30

@@ -1,0 +1,60 @@
+name: CI (mocked, no spend)
+
+# Runs the full test suite on every push and pull request.
+#
+# This workflow NEVER calls a model provider. Every test uses the offline test
+# double in arena_runner/providers.py, so it needs no secrets and costs nothing.
+# The tournament workflows are deliberately not triggered here: they are
+# manual-only, because a live run is billed.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Unit tests (offline)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Confirm no dependency install is needed
+        run: |
+          echo "The engine and the runner are standard library only."
+          if [ -f requirements.txt ]; then
+            echo "requirements.txt appeared; install it here if that is intentional."
+          fi
+
+      - name: Original engine tests plus migration tests
+        run: python3 -m unittest discover -s tests -v
+
+      - name: Confirm no live provider was reachable
+        run: python3 -m arena_runner doctor
+
+      - name: Guard against committed secrets
+        run: |
+          if git grep -nE '(sk-[A-Za-z0-9_-]{16,}|sk-ant-[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})' -- . ':(exclude)arena_runner/redact.py' ':(exclude)tests/*'; then
+            echo "A credential-shaped string was found in the repository."
+            exit 1
+          fi
+          if [ -f .env ] || [ -f .env.local ]; then
+            echo "A .env file is committed. Remove it."
+            exit 1
+          fi
+          echo "No committed credentials found."
